@@ -21,15 +21,15 @@ import subprocess
 import numpy as np
 from typing import Dict, Any
 
-# Import modular pipeline components directly for high performance
-from lidar_loader import load_las
-from stem_crown_segmentation import segment_stem_and_crown
-from dbh_estimation import estimate_dbh
-from cylinder_fitting import fit_trunk_cylinders
-from canopy_analysis import analyze_canopy
-from branch_analysis import analyze_branches
-from crown_base_height import estimate_crown_base_height
-from visualization import render_forestry_dashboard
+# Import modular pipeline components from the analysis package
+from analysis.lidar_loader import load_las
+from analysis.stem_crown_segmentation import segment_stem_and_crown
+from analysis.dbh_estimation import estimate_dbh
+from analysis.cylinder_fitting import fit_trunk_cylinders
+from analysis.canopy_analysis import analyze_canopy
+from analysis.branch_analysis import analyze_branches
+from analysis.crown_base_height import estimate_crown_base_height
+from analysis.visualization import render_forestry_dashboard
 
 
 def run_generator_script(script_name: str, preset: str, axis: str, seed: int = None) -> None:
@@ -216,11 +216,11 @@ def show_menu() -> None:
             seed = int(seed_in) if seed_in.isdigit() else None
 
             if choice == "1":
-                run_generator_script("generate_realistic_tree.py", preset, axis, seed)
+                run_generator_script(os.path.join("generators", "generate_realistic_tree.py"), preset, axis, seed)
             elif choice == "2":
-                run_generator_script("generate_realistic_canopy.py", preset, axis, seed)
+                run_generator_script(os.path.join("generators", "generate_realistic_canopy.py"), preset, axis, seed)
             elif choice == "4":
-                run_generator_script("generate_realistic_tree.py", preset, axis, seed)
+                run_generator_script(os.path.join("generators", "generate_realistic_tree.py"), preset, axis, seed)
                 # Analyze the generated tree
                 target_file = "realistic_synthetic_tree.las"
                 execute_analysis_pipeline(target_file, axis)
@@ -294,13 +294,13 @@ def main() -> None:
 
     if args.run is not None:
         if args.run == "tree":
-            run_generator_script("generate_realistic_tree.py", args.preset, args.axis, args.seed)
+            run_generator_script(os.path.join("generators", "generate_realistic_tree.py"), args.preset, args.axis, args.seed)
         elif args.run == "canopy":
-            run_generator_script("generate_realistic_canopy.py", args.preset, args.axis, args.seed)
+            run_generator_script(os.path.join("generators", "generate_realistic_canopy.py"), args.preset, args.axis, args.seed)
         elif args.run == "analyze":
             execute_analysis_pipeline(args.file, args.axis)
         elif args.run == "all":
-            run_generator_script("generate_realistic_tree.py", args.preset, args.axis, args.seed)
+            run_generator_script(os.path.join("generators", "generate_realistic_tree.py"), args.preset, args.axis, args.seed)
             execute_analysis_pipeline("realistic_synthetic_tree.las", args.axis)
     else:
         # Default to interactive menu mode

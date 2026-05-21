@@ -8,7 +8,10 @@ we reconstruct the tree's cylindrical taper profile (height vs. radius).
 
 import numpy as np
 from typing import List, Dict, Any, Tuple
-from dbh_estimation import fit_circle_2d
+try:
+    from dbh_estimation import fit_circle_2d
+except ImportError:
+    from analysis.dbh_estimation import fit_circle_2d
 
 
 def fit_trunk_cylinders(

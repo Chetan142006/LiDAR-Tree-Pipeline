@@ -33,7 +33,7 @@ A collection of analytical forestry modules that parse, segment, and extract bio
 ```mermaid
 flowchart TD
     subgraph Generation [3D Procedural Generator]
-        A[main.py CLI / Preset] --> B[generate_realistic_tree.py]
+        A[main.py CLI / Preset] --> B[generators/generate_realistic_tree.py]
         B --> C[Recursive L-System Wood Geometry]
         B --> D[Golden Spiral Foliage Phyllotaxis]
         C --> E[Concatenated Meshes]
@@ -43,16 +43,16 @@ flowchart TD
     end
 
     subgraph Pipeline [Forestry Analytical Pipeline]
-        G --> H[lidar_loader.py]
-        H --> I[stem_crown_segmentation.py]
-        I --> J1[dbh_estimation.py]
-        I --> J2[cylinder_fitting.py]
-        I --> J3[canopy_analysis.py]
-        I --> J4[branch_analysis.py]
-        I --> J5[crown_base_height.py]
+        G --> H[analysis/lidar_loader.py]
+        H --> I[analysis/stem_crown_segmentation.py]
+        I --> J1[analysis/dbh_estimation.py]
+        I --> J2[analysis/cylinder_fitting.py]
+        I --> J3[analysis/canopy_analysis.py]
+        I --> J4[analysis/branch_analysis.py]
+        I --> J5[analysis/crown_base_height.py]
         
         J1 & J2 & J3 & J4 & J5 --> K[main.py Comparative Forestry Report]
-        J1 & J2 & J3 & J4 & J5 --> L[visualization.py Interactive 3D Dashboard]
+        J1 & J2 & J3 & J4 & J5 --> L[analysis/visualization.py Interactive 3D Dashboard]
     end
 ```
 
@@ -123,17 +123,24 @@ $$\cos \theta = \frac{\mathbf{v} \cdot \mathbf{t}}{\|\mathbf{v}\| \|\mathbf{t}\|
 ## Project Structure
 
 ```
-├── main.py                       # Unified project CLI & comparative report coordinator
-├── generate_realistic_tree.py    # Recursive L-system generator with curved organic leaves
-├── generate_realistic_canopy.py  # L-system generator with flat canopy box leaves
-├── lidar_loader.py                # Reads and validates coordinates and classes from .las files
-├── stem_crown_segmentation.py    # Classifies tree point clouds into wood vs. leaves
-├── dbh_estimation.py             # Horizontal slicing and iterative DBH circle fitting
-├── cylinder_fitting.py           # Horizontal slice circle fits mapping trunk taper cylinders
-├── canopy_analysis.py            # 3D Convex Hull calculations for canopy volume/area
-├── branch_analysis.py            # Isolate major branches and SVD principal direction fitting
-├── crown_base_height.py          # Vertical density profiling to locate crown base (CBH)
-├── visualization.py              # Compiles and loads the multi-panel 3D/2D visual dashboard
-├── view_las.py                   # Standalone coordinate and header verification validator
-└── .gitignore                    # Prevents tracking large binary .las and .ply assets
+├── main.py                          # Unified project CLI & comparative report coordinator
+├── view_las.py                      # Standalone coordinate and header verification validator
+├── .gitignore                       # Prevents tracking large binary .las and .ply assets
+├── README.md                        # Project documentation and architecture guide
+│
+├── analysis/                        # Forestry LiDAR Analysis package
+│   ├── __init__.py                  # Declares subdirectory as a package
+│   ├── lidar_loader.py              # Reads and validates coordinates and classes from .las files
+│   ├── stem_crown_segmentation.py    # Classifies tree point clouds into wood vs. leaves
+│   ├── dbh_estimation.py             # Horizontal slicing and iterative DBH circle fitting
+│   ├── cylinder_fitting.py           # Horizontal slice circle fits mapping trunk taper cylinders
+│   ├── canopy_analysis.py            # 3D Convex Hull calculations for canopy volume/area
+│   ├── branch_analysis.py            # Isolate major branches and SVD principal direction fitting
+│   ├── crown_base_height.py          # Vertical density profiling to locate crown base (CBH)
+│   └── visualization.py              # Compiles and loads the multi-panel 3D/2D visual dashboard
+│
+└── generators/                      # 3D Procedural Generator package
+    ├── __init__.py                  # Declares subdirectory as a package
+    ├── generate_realistic_tree.py   # Recursive L-system generator with curved organic leaves
+    └── generate_realistic_canopy.py # L-system generator with flat canopy box leaves
 ```
