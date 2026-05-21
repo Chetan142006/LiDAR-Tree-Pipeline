@@ -1,0 +1,16 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Large procedural data outputs
+*.las
+*.ply
+
+# IDEs and local configurations
+.idea/
+.vscode/
+.agents/
+.gemini/
+*.log

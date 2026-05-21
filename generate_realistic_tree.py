@@ -1,0 +1,464 @@
+"""
+Procedural Realistic 3D Tree Generator with Species-Specific L-System Branching,
+Gravitropism, Spiral Phyllotaxis Leaf Distribution, and Semantic Point Cloud LAS Export.
+
+This script implements:
+1. Procedural L-system recursive branching tree geometry (Trunk + Branches + Foliage).
+2. Architectural presets: Oak (Broadleaf), Pine (Conifer), Cypress (Columnar).
+3. Physical Gravitropism (gravitational branch droop).
+4. Spiral Foliar Phyllotaxis: Leaves distributed along the twig shafts in golden angle spirals.
+5. Surface point sampling of meshes using Trimesh.
+6. Point-level semantic class annotation (Class 1 = Wood, Class 0 = Leaf).
+7. Standard ASPRS LAS format point cloud export using laspy.
+"""
+
+import argparse
+import numpy as np
+import trimesh
+import laspy
+from typing import List, Tuple, Dict, Any
+
+
+def get_rotation_matrix_to_align_z_with(direction: np.ndarray) -> np.ndarray:
+    """
+    Computes the 3x3 rotation matrix that rotates the unit Z-axis vector [0, 0, 1]
+    to align with the target direction vector using Rodrigues' rotation formula.
+    """
+    norm = np.linalg.norm(direction)
+    if norm < 1e-8:
+        return np.eye(3)
+    b = direction / norm
+    a = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+
+    c = np.dot(a, b)
+
+    if c > 0.999999:
+        return np.eye(3)
+    if c < -0.999999:
+        return np.array([
+            [1.0, 0.0, 0.0],
+            [0.0, -1.0, 0.0],
+            [0.0, 0.0, -1.0]
+        ], dtype=np.float64)
+
+    v = np.cross(a, b)
+    V_x = np.array([
+        [0.0, -v[2], v[1]],
+        [v[2], 0.0, -v[0]],
+        [-v[1], v[0], 0.0]
+    ], dtype=np.float64)
+
+    R = np.eye(3) + V_x + np.dot(V_x, V_x) * (1.0 / (1.0 + c))
+    return R
+
+
+def spawn_curved_leaf(
+    position: np.ndarray,
+    orientation: np.ndarray,
+    twig_radius: float,
+    leaf_meshes: List[trimesh.Trimesh]
+) -> None:
+    """
+    Creates a single curved, 3D lanceolate organic leaf mesh at a target position and orientation.
+    """
+    leaf_length = np.maximum(0.12, twig_radius * 7.5)
+    leaf_width = leaf_length * 0.45
+    bend = leaf_length * 0.18
+
+    # Create a curved lanceolate leaf template along local Z-axis [0, 0, 1]
+    # Base is at [0, 0, 0], tip at [0, bend, leaf_length]
+    leaf_vertices = np.array([
+        [0.0, 0.0, 0.0],                             # Base (V0)
+        [leaf_width * 0.5, 0.0, leaf_length * 0.3],   # Mid-left (V1)
+        [-leaf_width * 0.5, 0.0, leaf_length * 0.3],  # Mid-right (V2)
+        [leaf_width * 0.3, 0.0, leaf_length * 0.7],   # Upper-left (V3)
+        [-leaf_width * 0.3, 0.0, leaf_length * 0.7],  # Upper-right (V4)
+        [0.0, bend, leaf_length]                      # Tip (V5)
+    ], dtype=np.float64)
+
+    leaf_faces = np.array([
+        [0, 1, 3], [0, 3, 5], [0, 5, 4], [0, 4, 2],  # Front faces
+        [0, 3, 1], [0, 5, 3], [0, 4, 5], [0, 2, 4]   # Back faces (double-sided)
+    ], dtype=np.int32)
+
+    # Orientation
+    d = orientation / np.linalg.norm(orientation)
+    R_leaf = get_rotation_matrix_to_align_z_with(d)
+
+    # Roll rotation around its own axis
+    roll_angle = np.random.uniform(0, 2 * np.pi)
+    cos_r = np.cos(roll_angle)
+    sin_r = np.sin(roll_angle)
+    K = np.array([
+        [0, -d[2], d[1]],
+        [d[2], 0, -d[0]],
+        [-d[1], d[0], 0]
+    ], dtype=np.float64)
+    R_roll = np.eye(3) + sin_r * K + (1 - cos_r) * np.dot(K, K)
+    
+    R_final = np.dot(R_roll, R_leaf)
+
+    T = np.eye(4)
+    T[:3, :3] = R_final
+    T[:3, 3] = position
+
+    leaf = trimesh.Trimesh(vertices=leaf_vertices, faces=leaf_faces)
+    leaf.apply_transform(T)
+    leaf_meshes.append(leaf)
+
+
+def distribute_leaves_spiral_phyllotaxis(
+    start_pt: np.ndarray,
+    direction: np.ndarray,
+    length: float,
+    radius: float,
+    leaf_meshes: List[trimesh.Trimesh],
+    num_leaves: int = 5
+) -> None:
+    """
+    Distributes leaves along the twig segment using a golden spiral phyllotaxis pattern.
+    """
+    d = direction / np.linalg.norm(direction)
+    
+    # Orthonormal basis {d, u, v}
+    if abs(d[0]) < 0.9:
+        r = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+    else:
+        r = np.array([0.0, 1.0, 0.0], dtype=np.float64)
+    u = np.cross(d, r)
+    u = u / np.linalg.norm(u)
+    v = np.cross(d, u)
+
+    golden_angle = np.radians(137.5)
+
+    for i in range(1, num_leaves + 1):
+        # Spacing along twig (leaving some gap near base)
+        fraction = 0.2 + 0.8 * (i / num_leaves)
+        pos = start_pt + fraction * d * length
+
+        # Golden spiral angle around branch axis
+        phi = i * golden_angle
+        # Outward flare from branch axis
+        theta = np.random.uniform(np.radians(20), np.radians(45))
+
+        # Leaf direction vector
+        leaf_dir = np.cos(theta) * d + np.sin(theta) * np.cos(phi) * u + np.sin(theta) * np.sin(phi) * v
+        spawn_curved_leaf(pos, leaf_dir, radius, leaf_meshes)
+
+
+def generate_branch_recursive(
+    start_pt: np.ndarray,
+    direction: np.ndarray,
+    length: float,
+    radius: float,
+    depth: int,
+    max_depth: int,
+    wood_meshes: List[trimesh.Trimesh],
+    leaf_meshes: List[trimesh.Trimesh],
+    preset_cfg: Dict[str, Any],
+    gravity_vector: np.ndarray
+) -> None:
+    """
+    Recursively generates L-system branch cylinders, incorporating gravitropism and presets.
+    """
+    direction = direction / np.linalg.norm(direction)
+
+    # 1. Create cylinder centered at origin along local Z
+    cylinder = trimesh.creation.cylinder(radius=radius, height=length)
+
+    # 2. Position cylinder along direction vector
+    end_pt = start_pt + direction * length
+    center = start_pt + direction * (length / 2.0)
+    R = get_rotation_matrix_to_align_z_with(direction)
+
+    T = np.eye(4)
+    T[:3, :3] = R
+    T[:3, 3] = center
+
+    cylinder.apply_transform(T)
+    wood_meshes.append(cylinder)
+
+    # 3. Handle foliar distribution along twig segments (at final levels)
+    if depth >= max_depth - 1:
+        distribute_leaves_spiral_phyllotaxis(start_pt, direction, length, radius, leaf_meshes, num_leaves=6)
+
+    # 4. Branch Split Recursion
+    if depth < max_depth:
+        # Orthonormal basis
+        d = direction
+        if abs(d[0]) < 0.9:
+            r = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+        else:
+            r = np.array([0.0, 1.0, 0.0], dtype=np.float64)
+        u = np.cross(d, r)
+        u = u / np.linalg.norm(u)
+        v = np.cross(d, u)
+
+        if preset_cfg["apical_dominance"]:
+            # CONIFER / PINE: Apical Dominance Mode
+            # One dominant vertical leader + a whorl of lateral side branches
+            
+            # Leader: grows almost straight vertically with minimal decay
+            leader_dir = np.cos(np.radians(3)) * d + np.sin(np.radians(3)) * (np.cos(0) * u + np.sin(0) * v)
+            leader_dir = leader_dir / np.linalg.norm(leader_dir)
+            
+            generate_branch_recursive(
+                start_pt=end_pt,
+                direction=leader_dir,
+                length=length * np.random.uniform(0.85, 0.90),
+                radius=radius * np.random.uniform(0.80, 0.85),
+                depth=depth + 1,
+                max_depth=max_depth,
+                wood_meshes=wood_meshes,
+                leaf_meshes=leaf_meshes,
+                preset_cfg=preset_cfg,
+                gravity_vector=gravity_vector
+            )
+
+            # Lateral whorl: 3 side branches spreading wide outward
+            num_laterals = 3
+            for i in range(num_laterals):
+                theta = np.random.uniform(preset_cfg["branching_angle_min"], preset_cfg["branching_angle_max"])
+                phi = (2 * np.pi * i / num_laterals) + np.random.uniform(-0.15, 0.15)
+
+                child_dir = np.cos(theta) * d + np.sin(theta) * np.cos(phi) * u + np.sin(theta) * np.sin(phi) * v
+                
+                # Apply Gravitropism (Downward droop on side branches)
+                child_dir = child_dir + preset_cfg["gravity_pull"] * gravity_vector
+                child_dir = child_dir / np.linalg.norm(child_dir)
+
+                generate_branch_recursive(
+                    start_pt=end_pt,
+                    direction=child_dir,
+                    length=length * np.random.uniform(preset_cfg["length_decay_min"], preset_cfg["length_decay_max"]),
+                    radius=radius * np.random.uniform(preset_cfg["radius_decay_min"], preset_cfg["radius_decay_max"]),
+                    depth=depth + 1,
+                    max_depth=max_depth,
+                    wood_meshes=wood_meshes,
+                    leaf_meshes=leaf_meshes,
+                    preset_cfg=preset_cfg,
+                    gravity_vector=gravity_vector
+                )
+        else:
+            # BROADLEAF / OAK / CYPRESS: Sympodial Bifurcation Mode (Splits into 2)
+            theta1 = np.random.uniform(preset_cfg["branching_angle_min"], preset_cfg["branching_angle_max"])
+            theta2 = np.random.uniform(preset_cfg["branching_angle_min"], preset_cfg["branching_angle_max"])
+
+            phi1 = np.random.uniform(0, 2 * np.pi)
+            phi2 = phi1 + np.pi + np.random.uniform(np.radians(-15), np.radians(15))
+
+            child1_dir = np.cos(theta1) * d + np.sin(theta1) * np.cos(phi1) * u + np.sin(theta1) * np.sin(phi1) * v
+            child2_dir = np.cos(theta2) * d + np.sin(theta2) * np.cos(phi2) * u + np.sin(theta2) * np.sin(phi2) * v
+
+            # Apply Gravitropism
+            child1_dir = child1_dir + preset_cfg["gravity_pull"] * gravity_vector
+            child2_dir = child2_dir + preset_cfg["gravity_pull"] * gravity_vector
+
+            child1_dir = child1_dir / np.linalg.norm(child1_dir)
+            child2_dir = child2_dir / np.linalg.norm(child2_dir)
+
+            length_decay = np.random.uniform(preset_cfg["length_decay_min"], preset_cfg["length_decay_max"])
+            radius_decay = np.random.uniform(preset_cfg["radius_decay_min"], preset_cfg["radius_decay_max"])
+
+            generate_branch_recursive(
+                start_pt=end_pt,
+                direction=child1_dir,
+                length=length * length_decay,
+                radius=radius * radius_decay,
+                depth=depth + 1,
+                max_depth=max_depth,
+                wood_meshes=wood_meshes,
+                leaf_meshes=leaf_meshes,
+                preset_cfg=preset_cfg,
+                gravity_vector=gravity_vector
+            )
+            generate_branch_recursive(
+                start_pt=end_pt,
+                direction=child2_dir,
+                length=length * length_decay,
+                radius=radius * radius_decay,
+                depth=depth + 1,
+                max_depth=max_depth,
+                wood_meshes=wood_meshes,
+                leaf_meshes=leaf_meshes,
+                preset_cfg=preset_cfg,
+                gravity_vector=gravity_vector
+            )
+
+
+def plot_point_cloud(points: np.ndarray, labels: np.ndarray) -> None:
+    """
+    Displays the generated 3D point cloud using Matplotlib 3D scatter plot.
+    """
+    print("Launching interactive 3D plot of the generated tree point cloud...")
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError:
+        print("Matplotlib not installed. Skipping display plot.")
+        return
+
+    wood_pts = points[labels == 1]
+    leaf_pts = points[labels == 0]
+
+    fig = plt.figure(figsize=(10, 8))
+    ax = fig.add_subplot(111, projection='3d')
+
+    ax.scatter(wood_pts[:, 0], wood_pts[:, 1], wood_pts[:, 2], c='#8B4513', s=2, label='Wood/Trunk (Class 1)', alpha=0.6)
+    ax.scatter(leaf_pts[:, 0], leaf_pts[:, 1], leaf_pts[:, 2], c='#228B22', s=0.8, label='Leaf/Canopy (Class 0)', alpha=0.5)
+
+    ax.set_xlabel('X (meters)')
+    ax.set_ylabel('Y (meters)')
+    ax.set_zlabel('Z (meters)')
+    ax.set_title('Procedural Upgraded L-System Tree 3D Point Cloud')
+    ax.legend(loc='upper right')
+
+    max_range = np.array([points[:, 0].max() - points[:, 0].min(), 
+                          points[:, 1].max() - points[:, 1].min(), 
+                          points[:, 2].max() - points[:, 2].min()]).max() / 2.0
+
+    mid_x = (points[:, 0].max() + points[:, 0].min()) * 0.5
+    mid_y = (points[:, 1].max() + points[:, 1].min()) * 0.5
+    mid_z = (points[:, 2].max() + points[:, 2].min()) * 0.5
+
+    ax.set_xlim(mid_x - max_range, mid_x + max_range)
+    ax.set_ylim(mid_y - max_range, mid_y + max_range)
+    ax.set_zlim(mid_z - max_range, mid_z + max_range)
+
+    plt.show()
+
+
+def main() -> None:
+    PRESETS = {
+        "oak": {
+            "branching_angle_min": np.radians(25),
+            "branching_angle_max": np.radians(35),
+            "length_decay_min": 0.75,
+            "length_decay_max": 0.85,
+            "radius_decay_min": 0.65,
+            "radius_decay_max": 0.75,
+            "gravity_pull": 0.15,
+            "apical_dominance": False
+        },
+        "pine": {
+            "branching_angle_min": np.radians(55),
+            "branching_angle_max": np.radians(70),
+            "length_decay_min": 0.55,
+            "length_decay_max": 0.65,
+            "radius_decay_min": 0.45,
+            "radius_decay_max": 0.55,
+            "gravity_pull": 0.25, # droop down
+            "apical_dominance": True
+        },
+        "cypress": {
+            "branching_angle_min": np.radians(10),
+            "branching_angle_max": np.radians(18),
+            "length_decay_min": 0.80,
+            "length_decay_max": 0.90,
+            "radius_decay_min": 0.70,
+            "radius_decay_max": 0.78,
+            "gravity_pull": -0.05, # upward hugging
+            "apical_dominance": False
+        }
+    }
+
+    parser = argparse.ArgumentParser(description="Procedural L-System synthetic tree generator.")
+    parser.add_argument("--seed", type=int, default=None, help="Random seed.")
+    parser.add_argument("--preset", type=str, default="oak", choices=["oak", "pine", "cypress"], help="Tree preset profile.")
+    parser.add_argument("--max-depth", type=int, default=5, help="L-system recursion depth.")
+    parser.add_argument("--trunk-length", type=float, default=4.0, help="Trunk length in meters.")
+    parser.add_argument("--trunk-radius", type=float, default=0.25, help="Trunk radius in meters.")
+    parser.add_argument("--axis", type=str, default="y", choices=["x", "y", "z"], help="Vertical growth axis.")
+    parser.add_argument("--output", type=str, default="realistic_synthetic_tree.las", help="Output LAS path.")
+    args = parser.parse_args()
+
+    if args.seed is None:
+        args.seed = int(np.random.randint(0, 1000000))
+        print(f"Using random seed: {args.seed}")
+    else:
+        print(f"Using manual seed: {args.seed}")
+
+    np.random.seed(args.seed)
+
+    # Set up growth axes and gravity vectors
+    if args.axis == "x":
+        direction = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+        gravity_vector = np.array([-1.0, 0.0, 0.0], dtype=np.float64)
+    elif args.axis == "y":
+        direction = np.array([0.0, 1.0, 0.0], dtype=np.float64)
+        gravity_vector = np.array([0.0, -1.0, 0.0], dtype=np.float64)
+    else:
+        direction = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+        gravity_vector = np.array([0.0, 0.0, -1.0], dtype=np.float64)
+
+    wood_meshes: List[trimesh.Trimesh] = []
+    leaf_meshes: List[trimesh.Trimesh] = []
+
+    print(f"Generating organic 3D tree. Preset: {args.preset.upper()} along {args.axis.upper()}-axis...")
+    generate_branch_recursive(
+        start_pt=np.array([0.0, 0.0, 0.0], dtype=np.float64),
+        direction=direction,
+        length=args.trunk_length,
+        radius=args.trunk_radius,
+        depth=1,
+        max_depth=args.max_depth,
+        wood_meshes=wood_meshes,
+        leaf_meshes=leaf_meshes,
+        preset_cfg=PRESETS[args.preset],
+        gravity_vector=gravity_vector
+    )
+
+    print(f"Concatenating {len(wood_meshes)} wood meshes and {len(leaf_meshes)} curved leaf meshes...")
+    wood_mesh = trimesh.util.concatenate(wood_meshes)
+    leaf_mesh = trimesh.util.concatenate(leaf_meshes)
+
+    # Colors for PLY
+    wood_mesh.visual.vertex_colors = np.tile([139, 69, 19, 255], (len(wood_mesh.vertices), 1)).astype(np.uint8)
+    leaf_mesh.visual.vertex_colors = np.tile([34, 139, 34, 255], (len(leaf_mesh.vertices), 1)).astype(np.uint8)
+
+    ply_output = args.output.replace(".las", ".ply")
+    print(f"Saving solid 3D representation to: {ply_output}...")
+    combined_mesh = trimesh.util.concatenate([wood_mesh, leaf_mesh])
+    combined_mesh.export(ply_output)
+
+    # Point Surface Sampling
+    print("Scattering points across mesh surfaces...")
+    num_wood_samples = 10000
+    # Canopy leaf abundance depends on preset
+    num_leaf_samples = 25000 if args.preset == "pine" else 20000 if args.preset == "cypress" else 20000
+
+    wood_points, _ = trimesh.sample.sample_surface(wood_mesh, num_wood_samples)
+    leaf_points, _ = trimesh.sample.sample_surface(leaf_mesh, num_leaf_samples)
+
+    wood_labels = np.full(wood_points.shape[0], 1, dtype=np.int32)
+    leaf_labels = np.full(leaf_points.shape[0], 0, dtype=np.int32)
+
+    all_points = np.vstack([wood_points, leaf_points])
+    all_labels = np.concatenate([wood_labels, leaf_labels])
+
+    # LAS Export using laspy
+    print(f"Configuring LasHeader and exporting to: {args.output}...")
+    header = laspy.LasHeader(point_format=3, version="1.2")
+    header.offsets = np.min(all_points, axis=0)
+    header.scales = np.array([0.001, 0.001, 0.001]) # mm scale
+
+    las = laspy.LasData(header)
+    las.x = all_points[:, 0]
+    las.y = all_points[:, 1]
+    las.z = all_points[:, 2]
+    las.classification = all_labels
+    las.write(args.output)
+
+    print("\n--- Point Cloud Validation Statistics ---")
+    print(f"File: {args.output}")
+    print(f"Total Points: {all_points.shape[0]}")
+    unique_classes, counts = np.unique(all_labels, return_counts=True)
+    for class_id, count in zip(unique_classes, counts):
+        class_name = "Leaf/Canopy (Class 0)" if class_id == 0 else "Wood/Trunk (Class 1)"
+        print(f"  {class_name}: {count} points ({count/all_points.shape[0]*100:.1f}%)")
+    print("----------------------------------------\n")
+
+    plot_point_cloud(all_points, all_labels)
+
+
+if __name__ == "__main__":
+    main()
