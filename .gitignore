@@ -7,6 +7,9 @@ __pycache__/
 # Large procedural data outputs
 *.las
 *.ply
+*.csv
+*.json
+!output/tree_metadata_results.csv
 
 # IDEs and local configurations
 .idea/

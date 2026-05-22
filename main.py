@@ -32,6 +32,191 @@ from analysis.crown_base_height import estimate_crown_base_height
 from analysis.visualization import render_forestry_dashboard
 
 
+def save_or_update_tree_metadata(
+    file_path: str,
+    is_generation: bool,
+    estimated_dbh_cm: float = None,
+    dbh_error_cm: float = None,
+    tree_height: float = None,
+    total_points: int = None
+) -> None:
+    """
+    Logs or updates tree metadata and results in the central CSV registry.
+    Ensures that if the file_path already exists, the matching row is updated in-place
+    instead of creating duplicate rows, while maintaining the same Tree_ID.
+    Also automatically cleans up any pre-existing duplicate rows for the same file path.
+    """
+    import csv
+    import json
+    
+    normalized_path = file_path.replace("\\", "/")
+    json_path = file_path.replace(".las", ".json")
+    
+    ground_truth_dbh = None
+    json_height = None
+    json_points = None
+    
+    # 1. Attempt to load sidecar JSON metadata if it exists
+    if os.path.exists(json_path):
+        try:
+            with open(json_path, "r") as f:
+                meta = json.load(f)
+            ground_truth_dbh = meta.get("Ground_Truth_DBH")
+            json_height = meta.get("Tree_Height")
+            json_points = meta.get("Total_Points")
+        except Exception as ex:
+            print(f"[WARNING] Failed to parse sidecar JSON: {ex}")
+            
+    # Default fallback for ground truth if it's a default generated file but JSON is missing
+    if ground_truth_dbh is None:
+        if "realistic_synthetic_tree" in normalized_path or "realistic_canopy_tree" in normalized_path:
+            ground_truth_dbh = 50.0  # 2 * 0.25 * 100
+        else:
+            ground_truth_dbh = float('nan')
+
+    # Fallback/merge values
+    if tree_height is None:
+        tree_height = json_height
+    if total_points is None:
+        total_points = json_points
+        
+    results_csv = os.path.join("output", "tree_metadata_results.csv")
+    os.makedirs("output", exist_ok=True)
+    existing_rows = []
+    
+    # 2. Read existing rows from CSV
+    if os.path.exists(results_csv):
+        try:
+            with open(results_csv, "r", newline="") as csvfile:
+                reader = csv.reader(csvfile)
+                header = next(reader, None)
+                if header:
+                    for row in reader:
+                        if row:
+                            existing_rows.append(row)
+        except Exception as ex:
+            print(f"[WARNING] Failed to read existing results CSV: {ex}")
+            
+    # 3. Clean up duplicates and look for exact file path match
+    unique_rows = []
+    seen_paths = set()
+    match_idx = -1
+    
+    for row in existing_rows:
+        if len(row) < 2:
+            continue
+        path = row[1].replace("\\", "/").strip().lower()
+        if path in seen_paths:
+            continue
+        seen_paths.add(path)
+        unique_rows.append(row)
+        if path == normalized_path.lower():
+            match_idx = len(unique_rows) - 1
+            
+    # Helper to format values
+    def fmt_val(val, fmt=None):
+        if val is None or (isinstance(val, float) and np.isnan(val)):
+            return ""
+        if fmt:
+            return fmt.format(val)
+        return str(val)
+
+    # 4. Construct updated or new row data
+    if match_idx != -1:
+        # Update existing row
+        existing_row = unique_rows[match_idx]
+        tree_id = existing_row[0]
+        
+        # If Ground Truth DBH is not provided or is nan, keep the old one if it was set
+        final_gt_dbh = ground_truth_dbh if (ground_truth_dbh is not None and not np.isnan(ground_truth_dbh)) else (float(existing_row[2]) if existing_row[2] else float('nan'))
+        
+        if is_generation:
+            # Re-generation clears previous analysis results
+            final_est_dbh = ""
+            final_dbh_err = ""
+        else:
+            # Analysis keeps/updates analysis results
+            final_est_dbh = fmt_val(estimated_dbh_cm, "{:.1f}")
+            if dbh_error_cm is not None:
+                final_dbh_err = fmt_val(dbh_error_cm, "{:.2f}")
+            elif estimated_dbh_cm is not None and final_gt_dbh is not None and not np.isnan(final_gt_dbh):
+                final_dbh_err = fmt_val(estimated_dbh_cm - final_gt_dbh, "{:.2f}")
+            else:
+                final_dbh_err = ""
+                
+        final_height = fmt_val(tree_height, "{:.2f}") if tree_height is not None else existing_row[5]
+        final_pts = fmt_val(total_points) if total_points is not None else existing_row[6]
+        
+        unique_rows[match_idx] = [
+            tree_id,
+            normalized_path,
+            fmt_val(final_gt_dbh, "{:.1f}"),
+            final_est_dbh,
+            final_dbh_err,
+            final_height,
+            final_pts
+        ]
+        print(f"[METADATA] Updating existing entry in {results_csv} for path: {normalized_path} (ID: {tree_id})")
+    else:
+        # Create a new row
+        max_num = 0
+        for row in unique_rows:
+            if row and row[0].startswith("tree_"):
+                try:
+                    num = int(row[0].split("_")[1])
+                    if num > max_num:
+                        max_num = num
+                except Exception:
+                    pass
+        next_id_num = max_num + 1
+        tree_id = f"tree_{next_id_num:04d}"
+        
+        if is_generation:
+            final_est_dbh = ""
+            final_dbh_err = ""
+        else:
+            final_est_dbh = fmt_val(estimated_dbh_cm, "{:.1f}")
+            if dbh_error_cm is not None:
+                final_dbh_err = fmt_val(dbh_error_cm, "{:.2f}")
+            elif estimated_dbh_cm is not None and ground_truth_dbh is not None and not np.isnan(ground_truth_dbh):
+                final_dbh_err = fmt_val(estimated_dbh_cm - ground_truth_dbh, "{:.2f}")
+            else:
+                final_dbh_err = ""
+                
+        new_row = [
+            tree_id,
+            normalized_path,
+            fmt_val(ground_truth_dbh, "{:.1f}"),
+            final_est_dbh,
+            final_dbh_err,
+            fmt_val(tree_height, "{:.2f}"),
+            fmt_val(total_points)
+        ]
+        unique_rows.append(new_row)
+        print(f"[METADATA] Creating new entry in {results_csv} for path: {normalized_path} (ID: {tree_id})")
+        
+    # Print status details
+    updated_rec = unique_rows[match_idx if match_idx != -1 else -1]
+    print(f"  Tree ID:           {updated_rec[0]}")
+    print(f"  File Path:         {updated_rec[1]}")
+    print(f"  Ground Truth DBH:  {updated_rec[2]} cm" if updated_rec[2] else "  Ground Truth DBH:  Unknown")
+    print(f"  Estimated DBH:     {updated_rec[3]} cm" if updated_rec[3] else "  Estimated DBH:     Pending Analysis")
+    print(f"  DBH Error:         {updated_rec[4]} cm" if updated_rec[4] else "  DBH Error:         N/A")
+    print(f"  Tree Height:       {updated_rec[5]} m")
+    print(f"  Total Points:      {updated_rec[6]}")
+
+    # 5. Write everything back
+    csv_columns = ["Tree_ID", "File_Path", "Ground_Truth_DBH", "Estimated_DBH", "DBH_Error", "Tree_Height", "Total_Points"]
+    try:
+        with open(results_csv, "w", newline="") as csvfile:
+            writer = csv.writer(csvfile)
+            writer.writerow(csv_columns)
+            writer.writerows(unique_rows)
+        print(f"[METADATA] Central registry successfully updated.")
+    except Exception as ex:
+        print(f"[ERROR] Failed to write tree metadata results CSV: {ex}")
+
+
 def run_generator_script(script_name: str, preset: str, axis: str, seed: int = None) -> None:
     """
     Runs a target tree generator script as a subprocess, forwarding biological presets.
@@ -64,10 +249,20 @@ def run_generator_script(script_name: str, preset: str, axis: str, seed: int = N
         # Inherit standard streams so interactive plots display
         subprocess.run(cmd, check=True)
         print(f"\n[SUCCESS] '{script_name}' finished execution.")
+        
+        # Determine output file path and save metadata
+        out_file = os.path.join("output", "realistic_synthetic_tree.las")
+        if "generate_realistic_canopy" in script_name:
+            out_file = os.path.join("output", "realistic_canopy_tree.las")
+            
+        if os.path.exists(out_file):
+            save_or_update_tree_metadata(out_file, is_generation=True)
+            
     except subprocess.CalledProcessError as e:
         print(f"\n[ERROR] '{script_name}' exited with error code {e.returncode}.")
     except KeyboardInterrupt:
         print(f"\n[INFO] Tree generation interrupted by user.")
+
 
 
 def execute_analysis_pipeline(file_path: str, vertical_axis: str = "y") -> None:
@@ -146,6 +341,25 @@ def execute_analysis_pipeline(file_path: str, vertical_axis: str = "y") -> None:
             print("    No major branch segments isolated.")
         print("=" * 65 + "\n")
 
+        # Step 7.5: Save comparative metadata and analysis results
+        try:
+            # Extract and compute comparative metrics
+            estimated_dbh_cm = float(dbh * 100.0) # in cm
+            
+            # Tree height: use canopy estimated height as the primary metric
+            tree_height = float(canopy_res.get("canopy_height", 0.0))
+            total_points = int(points.shape[0])
+
+            save_or_update_tree_metadata(
+                file_path=file_path,
+                is_generation=False,
+                estimated_dbh_cm=estimated_dbh_cm,
+                tree_height=tree_height,
+                total_points=total_points
+            )
+        except Exception as e:
+            print(f"[WARNING] Error writing tree results metadata: {e}")
+
         # Step 8: Render the Multi-Panel Interactive Visualization Dashboard
         render_forestry_dashboard(
             points=points,
@@ -222,7 +436,7 @@ def show_menu() -> None:
             elif choice == "4":
                 run_generator_script(os.path.join("generators", "generate_realistic_tree.py"), preset, axis, seed)
                 # Analyze the generated tree
-                target_file = "realistic_synthetic_tree.las"
+                target_file = os.path.join("output", "realistic_synthetic_tree.las")
                 execute_analysis_pipeline(target_file, axis)
 
         elif choice == "3":
@@ -233,9 +447,9 @@ def show_menu() -> None:
             print("  [3] Enter custom .las file path...")
             file_choice = input("Choice [1-3] (Default=1): ").strip()
             
-            target_file = "realistic_synthetic_tree.las"
+            target_file = os.path.join("output", "realistic_synthetic_tree.las")
             if file_choice == "2":
-                target_file = "realistic_canopy_tree.las"
+                target_file = os.path.join("output", "realistic_canopy_tree.las")
             elif file_choice == "3":
                 custom_file = input("Enter full file path: ").strip()
                 if custom_file:
@@ -280,7 +494,7 @@ def main() -> None:
     parser.add_argument(
         "--file", 
         type=str, 
-        default="realistic_synthetic_tree.las", 
+        default=os.path.join("output", "realistic_synthetic_tree.las"), 
         help="Target LAS file for analysis."
     )
     parser.add_argument(
@@ -301,7 +515,7 @@ def main() -> None:
             execute_analysis_pipeline(args.file, args.axis)
         elif args.run == "all":
             run_generator_script(os.path.join("generators", "generate_realistic_tree.py"), args.preset, args.axis, args.seed)
-            execute_analysis_pipeline("realistic_synthetic_tree.las", args.axis)
+            execute_analysis_pipeline(os.path.join("output", "realistic_synthetic_tree.las"), args.axis)
     else:
         # Default to interactive menu mode
         show_menu()

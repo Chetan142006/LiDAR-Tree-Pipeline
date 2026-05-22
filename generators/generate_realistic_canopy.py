@@ -13,6 +13,7 @@ This script implements:
 """
 
 import argparse
+import os
 import numpy as np
 import trimesh
 import laspy
@@ -350,8 +351,11 @@ def main() -> None:
     parser.add_argument("--trunk-length", type=float, default=4.0, help="Trunk length in meters.")
     parser.add_argument("--trunk-radius", type=float, default=0.25, help="Trunk radius in meters.")
     parser.add_argument("--axis", type=str, default="y", choices=["x", "y", "z"], help="Vertical growth axis.")
-    parser.add_argument("--output", type=str, default="realistic_canopy_tree.las", help="Output LAS path.")
+    parser.add_argument("--output", type=str, default=os.path.join("output", "realistic_canopy_tree.las"), help="Output LAS path.")
     args = parser.parse_args()
+
+    # Ensure output directory exists
+    os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
 
     if args.seed is None:
         args.seed = int(np.random.randint(0, 1000000))
@@ -416,6 +420,50 @@ def main() -> None:
     all_points = np.vstack([wood_points, leaf_points])
     all_labels = np.concatenate([wood_labels, leaf_labels])
 
+    # Generate realistic LiDAR Intensity and Return statistics
+    num_pts = all_points.shape[0]
+    intensities = np.zeros(num_pts, dtype=np.int32)
+    return_numbers = np.ones(num_pts, dtype=np.int32)
+    number_of_returns = np.ones(num_pts, dtype=np.int32)
+
+    # Wood points (Class 1) - Low NIR reflectivity (bark/wood), 100% single returns
+    wood_mask = (all_labels == 1)
+    num_wood = np.sum(wood_mask)
+    if num_wood > 0:
+        intensities[wood_mask] = np.clip(np.random.normal(60, 15, num_wood).astype(np.int32), 10, 120)
+        return_numbers[wood_mask] = 1
+        number_of_returns[wood_mask] = 1
+
+    # Leaf points (Class 0) - High NIR reflectivity (chlorophyll), multiple returns simulated
+    leaf_mask = (all_labels == 0)
+    num_leaf = np.sum(leaf_mask)
+    if num_leaf > 0:
+        intensities[leaf_mask] = np.clip(np.random.normal(180, 25, num_leaf).astype(np.int32), 80, 255)
+        
+        # Simulating laser penetration: 70% single return, 20% first of two, 10% second of two
+        leaf_rand = np.random.rand(num_leaf)
+        leaf_returns = np.ones(num_leaf, dtype=np.int32)
+        leaf_num_returns = np.ones(num_leaf, dtype=np.int32)
+        
+        mask_1_of_2 = (leaf_rand >= 0.7) & (leaf_rand < 0.9)
+        leaf_returns[mask_1_of_2] = 1
+        leaf_num_returns[mask_1_of_2] = 2
+        
+        mask_2_of_2 = (leaf_rand >= 0.9)
+        leaf_returns[mask_2_of_2] = 2
+        leaf_num_returns[mask_2_of_2] = 2
+        
+        return_numbers[leaf_mask] = leaf_returns
+        number_of_returns[leaf_mask] = leaf_num_returns
+
+    # Verify no empty/NaN values exist. If any NaN exists, drop that row completely.
+    valid_mask = ~np.isnan(all_points).any(axis=1) & ~np.isnan(all_labels) & ~np.isnan(intensities) & ~np.isnan(return_numbers) & ~np.isnan(number_of_returns)
+    all_points = all_points[valid_mask]
+    all_labels = all_labels[valid_mask]
+    intensities = intensities[valid_mask]
+    return_numbers = return_numbers[valid_mask]
+    number_of_returns = number_of_returns[valid_mask]
+
     # LAS Export using laspy
     print(f"Configuring LasHeader and exporting to: {args.output}...")
     header = laspy.LasHeader(point_format=3, version="1.2")
@@ -427,7 +475,42 @@ def main() -> None:
     las.y = all_points[:, 1]
     las.z = all_points[:, 2]
     las.classification = all_labels
+    las.intensity = intensities
+    las.return_number = return_numbers
+    las.number_of_returns = number_of_returns
     las.write(args.output)
+
+    # Also save as human-readable CSV for easy analysis (Excel, MATLAB, etc.)
+    csv_output = args.output.replace(".las", "_points.csv")
+    print(f"Saving human-readable CSV coordinates to: {csv_output}...")
+    csv_data = np.column_stack((
+        all_points[:, 0],
+        all_points[:, 1],
+        all_points[:, 2],
+        all_labels,
+        intensities,
+        return_numbers,
+        number_of_returns
+    ))
+    np.savetxt(csv_output, csv_data, delimiter=",", 
+               header="x,y,z,classification,intensity,return_number,number_of_returns", 
+               fmt=["%.5f", "%.5f", "%.5f", "%d", "%d", "%d", "%d"],
+               comments="")
+
+    # Save a sidecar JSON file with generation metadata
+    import json
+    json_output = args.output.replace(".las", ".json")
+    v_idx = {"x": 0, "y": 1, "z": 2}[args.axis.lower()]
+    tree_height = float(np.max(all_points[:, v_idx]) - np.min(all_points[:, v_idx]))
+    metadata = {
+        "File_Path": args.output,
+        "Ground_Truth_DBH": float(2 * args.trunk_radius * 100.0), # in cm
+        "Tree_Height": tree_height, # in meters
+        "Total_Points": int(all_points.shape[0])
+    }
+    print(f"Saving sidecar JSON metadata to: {json_output}...")
+    with open(json_output, "w") as f:
+        json.dump(metadata, f, indent=4)
 
     print("\n--- Point Cloud Validation Statistics ---")
     print(f"File: {args.output}")
